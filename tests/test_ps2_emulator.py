@@ -32,9 +32,7 @@ class PS2EmulatorTests(unittest.TestCase):
         executed = emulator.run_frame(instruction_budget)
         # Milestone scaffold currently models one byte fetched per step.
         expected_pc = (EE_RESET_VECTOR + instruction_budget) & 0xFFFFFFFF
-        expected_cycles = sum(
-            emulator.system.ee.cycle_cost(opcode) for opcode in bios[:instruction_budget]
-        )
+        expected_cycles = 2 + 3 + 4
 
         self.assertEqual(executed, instruction_budget)
         self.assertEqual(emulator.frame_count, 1)
@@ -54,6 +52,17 @@ class PS2EmulatorTests(unittest.TestCase):
         self.assertEqual(
             emulator.system.memory_map.read8(BIOS_START + 1, virtual=False), 0xBB
         )
+
+    def test_bios_cannot_be_reloaded_on_same_system(self):
+        emulator = PS2Emulator()
+        with tempfile.TemporaryDirectory() as tmp:
+            bios_a = Path(tmp) / "bios_a.bin"
+            bios_b = Path(tmp) / "bios_b.bin"
+            bios_a.write_bytes(bytes([0x01]) + bytes(8))
+            bios_b.write_bytes(bytes([0x02]) + bytes(8))
+            emulator.load_bios(bios_a)
+            with self.assertRaises(RuntimeError):
+                emulator.load_bios(bios_b)
 
 
 if __name__ == "__main__":

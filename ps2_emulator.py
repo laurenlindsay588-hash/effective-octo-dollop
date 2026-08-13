@@ -161,6 +161,8 @@ class PS2System:
     def load_bios_bytes(self, bios: bytes) -> None:
         if not bios:
             raise ValueError("BIOS file is empty")
+        if self.bios_loaded:
+            raise RuntimeError("BIOS already loaded; create a new system to reload")
         if len(bios) > BIOS_SIZE:
             raise ValueError("BIOS is larger than mapped BIOS region")
 
