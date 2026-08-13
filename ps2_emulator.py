@@ -34,7 +34,7 @@ class MemoryRegion:
     data: bytearray = field(default_factory=bytearray)
 
     def __post_init__(self) -> None:
-        if not self.data:
+        if len(self.data) == 0:
             self.data = bytearray(self.size)
         if len(self.data) != self.size:
             raise ValueError(f"{self.name} region size mismatch")
@@ -115,15 +115,18 @@ class EECore:
         self.cycles = 0
         self.gpr = [0] * 32
 
-    def step(self, memory_map: MemoryMap) -> int:
+    def cycle_cost(self, opcode: int) -> int:
+        return self._CYCLE_TABLE[opcode & 0b11]
+
+    def step(self, memory_map: MemoryMap) -> tuple[int, int]:
         if not self.powered_on:
             raise RuntimeError("EE core is not powered on")
 
         opcode = memory_map.read8(self.pc, virtual=True)
         self.pc = (self.pc + 1) & 0xFFFFFFFF
-        cycle_cost = self._CYCLE_TABLE[opcode & 0b11]
+        cycle_cost = self.cycle_cost(opcode)
         self.cycles += cycle_cost
-        return opcode
+        return opcode, cycle_cost
 
 
 @dataclass
@@ -160,8 +163,8 @@ class PS2System:
         self.scheduler.current_cycle = 0
 
     def step(self) -> int:
-        opcode = self.ee.step(self.memory_map)
-        self.scheduler.advance(self.ee._CYCLE_TABLE[opcode & 0b11])
+        opcode, cycle_cost = self.ee.step(self.memory_map)
+        self.scheduler.advance(cycle_cost)
         return opcode
 
     def run_instructions(self, instruction_budget: int) -> int:
