@@ -16,6 +16,7 @@ class EEMemoryHarnessTests(unittest.TestCase):
 
     def test_memory_map_translates_kseg0_to_physical_ram(self):
         system = PS2System()
+        self.assertEqual(system.memory_map.mmu.translate_ee_virtual(0x80000010), 0x00000010)
         system.memory_map.write8(0x80000010, 0x5A, virtual=True)
         self.assertEqual(system.memory_map.read8(0x00000010, virtual=False), 0x5A)
 

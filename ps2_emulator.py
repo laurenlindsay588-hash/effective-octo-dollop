@@ -62,6 +62,8 @@ class MMU:
     """EE address translation helper."""
 
     def translate_ee_virtual(self, address: int) -> int:
+        # Milestone-1: partial map (KUSEG identity, KSEG0/KSEG1 direct aliases).
+        # KSEG2/SSEG is intentionally not modeled yet and raises below.
         if 0x00000000 <= address <= 0x7FFFFFFF:
             return address
         # KSEG0/KSEG1 virtual aliases for physical 0x0000_0000..0x1FFF_FFFF
@@ -110,7 +112,8 @@ class EventScheduler:
 
 @dataclass
 class EECore:
-    # Placeholder timing model for milestone scaffolding, not real EE timing.
+    # Placeholder timing model indexed by (opcode & 0b11) -> cycles 1..4.
+    # This is scaffolding, not real EE timing.
     _CYCLE_TABLE: ClassVar[tuple[int, int, int, int]] = (1, 2, 3, 4)
 
     powered_on: bool = False
