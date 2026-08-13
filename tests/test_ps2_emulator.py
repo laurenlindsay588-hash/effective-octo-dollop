@@ -21,18 +21,24 @@ class PS2EmulatorTests(unittest.TestCase):
 
     def test_run_frame_updates_state(self):
         emulator = PS2Emulator()
+        bios = bytes([0x01, 0x02, 0x03, 0x00])
         with tempfile.TemporaryDirectory() as tmp:
             bios_path = Path(tmp) / "bios.bin"
-            bios_path.write_bytes(bytes([0x01, 0x02, 0x03, 0x00]))
+            bios_path.write_bytes(bios)
             emulator.load_bios(bios_path)
 
         emulator.power_on()
-        executed = emulator.run_frame(4)
+        instruction_budget = 4
+        executed = emulator.run_frame(instruction_budget)
+        expected_pc = instruction_budget % len(bios)
+        expected_cycles = sum(
+            emulator._CYCLE_TABLE[opcode & 0b11] for opcode in bios[:instruction_budget]
+        )
 
-        self.assertEqual(executed, 4)
+        self.assertEqual(executed, instruction_budget)
         self.assertEqual(emulator.frame_count, 1)
-        self.assertEqual(emulator.pc, 0)
-        self.assertEqual(emulator.cycles, 10)
+        self.assertEqual(emulator.pc, expected_pc)
+        self.assertEqual(emulator.cycles, expected_cycles)
 
 
 if __name__ == "__main__":

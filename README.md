@@ -3,7 +3,7 @@
 ## PS2 emulator scaffold
 
 This repository now includes a minimal PlayStation 2 emulator scaffold in
-`/home/runner/work/effective-octo-dollop/effective-octo-dollop/ps2_emulator.py`.
+`ps2_emulator.py`.
 
 Current capabilities:
 - Load BIOS bytes from a file
@@ -15,6 +15,5 @@ Current capabilities:
 Run tests:
 
 ```bash
-cd /home/runner/work/effective-octo-dollop/effective-octo-dollop
 python -m unittest discover -s tests
 ```

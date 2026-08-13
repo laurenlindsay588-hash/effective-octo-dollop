@@ -6,7 +6,7 @@ points. It is not a full hardware-accurate implementation.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -14,12 +14,12 @@ from pathlib import Path
 class PS2Emulator:
     """A minimal PS2 emulator core scaffold."""
 
+    _CYCLE_TABLE: tuple[int, int, int, int] = (1, 2, 3, 4)
     bios: bytes | None = None
     powered_on: bool = False
     pc: int = 0
     cycles: int = 0
     frame_count: int = 0
-    _cycle_table: tuple[int, int, int, int] = field(default=(1, 2, 3, 4), init=False)
 
     def load_bios(self, bios_path: str | Path) -> None:
         """Load BIOS bytes from disk."""
@@ -46,7 +46,7 @@ class PS2Emulator:
 
         opcode = self.bios[self.pc]
         self.pc = (self.pc + 1) % len(self.bios)
-        self.cycles += self._cycle_table[opcode & 0b11]
+        self.cycles += self._CYCLE_TABLE[opcode & 0b11]
         return opcode
 
     def run_frame(self, instruction_budget: int = 1000) -> int:
@@ -54,12 +54,10 @@ class PS2Emulator:
         if instruction_budget <= 0:
             raise ValueError("instruction_budget must be positive")
 
-        executed = 0
         for _ in range(instruction_budget):
             self.step()
-            executed += 1
         self.frame_count += 1
-        return executed
+        return instruction_budget
 
     def status(self) -> dict[str, int | bool]:
         """Return current emulator status values."""
