@@ -51,6 +51,8 @@ class MemoryRegion:
         self.data[address - self.start] = value & 0xFF
 
     def load_bytes(self, payload: bytes, offset: int = 0) -> None:
+        # Intentional raw loader for initialization paths (e.g., BIOS image load).
+        # Runtime writes must still go through write8(), which enforces read_only.
         end = offset + len(payload)
         if offset < 0 or end > self.size:
             raise ValueError(f"{self.name} load out of bounds")

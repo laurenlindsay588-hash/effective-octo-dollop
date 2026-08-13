@@ -32,6 +32,7 @@ class PS2EmulatorTests(unittest.TestCase):
         executed = emulator.run_frame(instruction_budget)
         # Milestone scaffold currently models one byte fetched per step.
         expected_pc = (EE_RESET_VECTOR + instruction_budget) & 0xFFFFFFFF
+        # Opcodes 0x01, 0x02, 0x03 map to cycle costs 2, 3, 4 via opcode&0b11.
         expected_cycles = 2 + 3 + 4
 
         self.assertEqual(executed, instruction_budget)
