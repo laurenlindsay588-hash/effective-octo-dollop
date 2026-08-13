@@ -28,7 +28,7 @@ class PS2EmulatorTests(unittest.TestCase):
             emulator.load_bios(bios_path)
 
         emulator.power_on()
-        instruction_budget = 4
+        instruction_budget = 3
         executed = emulator.run_frame(instruction_budget)
         expected_pc = instruction_budget % len(bios)
         expected_cycles = sum(

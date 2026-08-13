@@ -8,13 +8,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import ClassVar
 
 
 @dataclass
 class PS2Emulator:
     """A minimal PS2 emulator core scaffold."""
 
-    _CYCLE_TABLE: tuple[int, int, int, int] = (1, 2, 3, 4)
+    _CYCLE_TABLE: ClassVar[tuple[int, int, int, int]] = (1, 2, 3, 4)
     bios: bytes | None = None
     powered_on: bool = False
     pc: int = 0
@@ -53,6 +54,8 @@ class PS2Emulator:
         """Execute a frame worth of pseudo-instructions."""
         if instruction_budget <= 0:
             raise ValueError("instruction_budget must be positive")
+        if not self.powered_on:
+            raise RuntimeError("Emulator is not powered on")
 
         for _ in range(instruction_budget):
             self.step()
