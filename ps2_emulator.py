@@ -110,6 +110,7 @@ class EventScheduler:
 
 @dataclass
 class EECore:
+    # Placeholder timing model for milestone scaffolding, not real EE timing.
     _CYCLE_TABLE: ClassVar[tuple[int, int, int, int]] = (1, 2, 3, 4)
 
     powered_on: bool = False
@@ -192,10 +193,19 @@ class PS2Emulator:
 
     system: PS2System = field(default_factory=PS2System)
     bios: bytes | None = None
-    powered_on: bool = False
-    pc: int = EE_RESET_VECTOR
-    cycles: int = 0
     frame_count: int = 0
+
+    @property
+    def powered_on(self) -> bool:
+        return self.system.ee.powered_on
+
+    @property
+    def pc(self) -> int:
+        return self.system.ee.pc
+
+    @property
+    def cycles(self) -> int:
+        return self.system.ee.cycles
 
     def load_bios(self, bios_path: str | Path) -> None:
         """Load BIOS bytes from disk."""
@@ -207,25 +217,15 @@ class PS2Emulator:
     def power_on(self) -> None:
         """Reset and power on the emulator."""
         self.system.power_on()
-        self.powered_on = self.system.ee.powered_on
-        self.pc = self.system.ee.pc
-        self.cycles = self.system.ee.cycles
         self.frame_count = 0
 
     def step(self) -> int:
         """Execute one pseudo-instruction and return opcode byte."""
-        opcode = self.system.step()
-        self.powered_on = self.system.ee.powered_on
-        self.pc = self.system.ee.pc
-        self.cycles = self.system.ee.cycles
-        return opcode
+        return self.system.step()
 
     def run_frame(self, instruction_budget: int = 1000) -> int:
         """Execute a frame worth of pseudo-instructions."""
         executed = self.system.run_instructions(instruction_budget)
-        self.powered_on = self.system.ee.powered_on
-        self.pc = self.system.ee.pc
-        self.cycles = self.system.ee.cycles
         self.frame_count += 1
         return executed
 

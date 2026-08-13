@@ -30,6 +30,7 @@ class PS2EmulatorTests(unittest.TestCase):
         emulator.power_on()
         instruction_budget = 3
         executed = emulator.run_frame(instruction_budget)
+        # Milestone scaffold currently models one byte fetched per step.
         expected_pc = (EE_RESET_VECTOR + instruction_budget) & 0xFFFFFFFF
         expected_cycles = sum(
             emulator.system.ee.cycle_cost(opcode) for opcode in bios[:instruction_budget]
