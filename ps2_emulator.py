@@ -50,18 +50,26 @@ class MemoryRegion:
             raise PermissionError(f"{self.name} is read-only")
         self.data[address - self.start] = value & 0xFF
 
+    def load_bytes(self, payload: bytes, offset: int = 0) -> None:
+        end = offset + len(payload)
+        if offset < 0 or end > self.size:
+            raise ValueError(f"{self.name} load out of bounds")
+        self.data[offset:end] = payload
+
 
 @dataclass
 class MMU:
     """EE address translation helper."""
 
     def translate_ee_virtual(self, address: int) -> int:
+        if 0x00000000 <= address <= 0x7FFFFFFF:
+            return address
         # KSEG0/KSEG1 virtual aliases for physical 0x0000_0000..0x1FFF_FFFF
         if 0x80000000 <= address <= 0x9FFFFFFF:
             return address - 0x80000000
         if 0xA0000000 <= address <= 0xBFFFFFFF:
             return address - 0xA0000000
-        return address
+        raise ValueError(f"Unsupported EE virtual address segment: 0x{address:08X}")
 
 
 @dataclass
@@ -153,7 +161,7 @@ class PS2System:
             raise ValueError("BIOS is larger than mapped BIOS region")
 
         bios_region, _ = self.memory_map.resolve(BIOS_START, virtual=False)
-        bios_region.data[: len(bios)] = bios
+        bios_region.load_bytes(bios)
         self.bios_loaded = True
 
     def power_on(self) -> None:

@@ -32,8 +32,7 @@ class PS2EmulatorTests(unittest.TestCase):
         executed = emulator.run_frame(instruction_budget)
         expected_pc = (EE_RESET_VECTOR + instruction_budget) & 0xFFFFFFFF
         expected_cycles = sum(
-            emulator.system.ee._CYCLE_TABLE[opcode & 0b11]
-            for opcode in bios[:instruction_budget]
+            emulator.system.ee.cycle_cost(opcode) for opcode in bios[:instruction_budget]
         )
 
         self.assertEqual(executed, instruction_budget)
