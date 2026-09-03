@@ -14,7 +14,7 @@ import json
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import ClassVar
+from typing import Callable, Protocol
 
 
 EE_RAM_START = 0x00000000
@@ -26,6 +26,74 @@ BIOS_SIZE = 4 * 1024 * 1024
 SCRATCHPAD_START = 0x70000000
 SCRATCHPAD_SIZE = 16 * 1024
 EE_RESET_VECTOR = 0xBFC00000
+TIMER0_START = 0x10000000
+TIMER0_SIZE = 0x10
+INTC_START = 0x10001000
+INTC_SIZE = 0x10
+
+
+@dataclass(frozen=True)
+class BootROM:
+    image: bytes
+    entry_point: int = EE_RESET_VECTOR
+
+
+class BootstrapLoader:
+    @staticmethod
+    def from_bios_bytes(bios: bytes) -> BootROM:
+        if not bios:
+            raise ValueError("BIOS file is empty")
+        if len(bios) > BIOS_SIZE:
+            raise ValueError("BIOS is larger than mapped BIOS region")
+        return BootROM(image=bios)
+
+    @staticmethod
+    def from_bios_path(path: str | Path) -> BootROM:
+        return BootstrapLoader.from_bios_bytes(Path(path).read_bytes())
+
+
+@dataclass(frozen=True)
+class ELFImage:
+    entry_point: int
+    program_header_offset: int
+    program_header_count: int
+
+
+class ELFLoader:
+    @staticmethod
+    def parse_elf32(raw: bytes) -> ELFImage:
+        if len(raw) < 52:
+            raise ValueError("ELF file too small for ELF32 header")
+        if raw[:4] != b"\x7fELF":
+            raise ValueError("Invalid ELF magic")
+        if raw[4] != 1:
+            raise ValueError("Only ELF32 is supported in this milestone")
+        if raw[5] != 1:
+            raise ValueError("Only little-endian ELF is supported in this milestone")
+        entry_point = int.from_bytes(raw[24:28], "little")
+        phoff = int.from_bytes(raw[28:32], "little")
+        phnum = int.from_bytes(raw[44:46], "little")
+        return ELFImage(
+            entry_point=entry_point,
+            program_header_offset=phoff,
+            program_header_count=phnum,
+        )
+
+    @staticmethod
+    def parse_elf32_path(path: str | Path) -> ELFImage:
+        return ELFLoader.parse_elf32(Path(path).read_bytes())
+
+
+class AddressableRegion(Protocol):
+    name: str
+    start: int
+    size: int
+
+    def contains(self, address: int) -> bool: ...
+
+    def read8(self, address: int) -> int: ...
+
+    def write8(self, address: int, value: int) -> None: ...
 
 
 @dataclass
@@ -85,6 +153,95 @@ class MemoryRegion:
 
 
 @dataclass
+class TimerDevice:
+    counter: int = 0
+    compare: int = 0
+    interrupt_latched: bool = False
+
+    def tick(self, cycles: int) -> bool:
+        self.counter = (self.counter + cycles) & 0xFFFFFFFF
+        if self.compare != 0 and self.counter >= self.compare and not self.interrupt_latched:
+            self.interrupt_latched = True
+            return True
+        return False
+
+    def read8(self, offset: int) -> int:
+        if 0 <= offset < 4:
+            return (self.counter >> (offset * 8)) & 0xFF
+        if 4 <= offset < 8:
+            return (self.compare >> ((offset - 4) * 8)) & 0xFF
+        return 0
+
+    def write8(self, offset: int, value: int) -> None:
+        value8 = value & 0xFF
+        if 0 <= offset < 4:
+            shift = offset * 8
+            self.counter = (self.counter & ~(0xFF << shift)) | (value8 << shift)
+            self.interrupt_latched = False
+            return
+        if 4 <= offset < 8:
+            shift = (offset - 4) * 8
+            self.compare = (self.compare & ~(0xFF << shift)) | (value8 << shift)
+            self.interrupt_latched = False
+
+
+@dataclass
+class InterruptController:
+    pending: int = 0
+    mask: int = 0
+
+    def request(self, line: int) -> None:
+        self.pending |= 1 << line
+
+    def irq_asserted(self) -> bool:
+        return (self.pending & self.mask) != 0
+
+    def read8(self, offset: int) -> int:
+        if 0 <= offset < 4:
+            return (self.pending >> (offset * 8)) & 0xFF
+        if 4 <= offset < 8:
+            return (self.mask >> ((offset - 4) * 8)) & 0xFF
+        return 0
+
+    def write8(self, offset: int, value: int) -> None:
+        value8 = value & 0xFF
+        if 0 <= offset < 4:
+            shift = offset * 8
+            self.pending &= ~(value8 << shift)
+            return
+        if 4 <= offset < 8:
+            shift = (offset - 4) * 8
+            self.mask = (self.mask & ~(0xFF << shift)) | (value8 << shift)
+
+
+@dataclass
+class DeviceRegion:
+    name: str
+    start: int
+    size: int
+    read_handler: Callable[[int], int]
+    write_handler: Callable[[int, int], None]
+
+    def contains(self, address: int) -> bool:
+        return self.start <= address < (self.start + self.size)
+
+    def read8(self, address: int) -> int:
+        return self.read_handler(address - self.start)
+
+    def write8(self, address: int, value: int) -> None:
+        self.write_handler(address - self.start, value & 0xFF)
+
+
+@dataclass(frozen=True)
+class InstructionResult:
+    pc_before: int
+    pc_after: int
+    opcode: int
+    mnemonic: str
+    cycle_cost: int
+
+
+@dataclass
 class MMU:
     """EE address translation helper."""
 
@@ -104,9 +261,9 @@ class MMU:
 @dataclass
 class MemoryMap:
     mmu: MMU = field(default_factory=MMU)
-    regions: list[MemoryRegion] = field(default_factory=list)
+    regions: list[AddressableRegion] = field(default_factory=list)
 
-    def map_region(self, region: MemoryRegion) -> None:
+    def map_region(self, region: AddressableRegion) -> None:
         region_end = region.start + region.size
         for existing in self.regions:
             existing_end = existing.start + existing.size
@@ -137,19 +294,21 @@ class EventScheduler:
     """Cycle-domain skeleton for future device sync points."""
 
     current_cycle: int = 0
+    listeners: list[Callable[[int, int], None]] = field(default_factory=list)
+
+    def register_listener(self, listener: Callable[[int, int], None]) -> None:
+        self.listeners.append(listener)
 
     def advance(self, cycles: int) -> None:
         if cycles < 0:
             raise ValueError("cycles must be non-negative")
         self.current_cycle += cycles
+        for listener in self.listeners:
+            listener(cycles, self.current_cycle)
 
 
 @dataclass
 class EECore:
-    # Placeholder timing model indexed by (opcode & 0b11) -> cycles 1..4.
-    # This is scaffolding, not real EE timing.
-    _CYCLE_TABLE: ClassVar[tuple[int, int, int, int]] = (1, 2, 3, 4)
-
     powered_on: bool = False
     pc: int = EE_RESET_VECTOR
     cycles: int = 0
@@ -161,18 +320,49 @@ class EECore:
         self.cycles = 0
         self.gpr = [0] * 32
 
-    def cycle_cost(self, opcode: int) -> int:
-        return self._CYCLE_TABLE[opcode & 0b11]
-
-    def step(self, memory_map: MemoryMap) -> tuple[int, int]:
+    def step(self, memory_map: MemoryMap) -> InstructionResult:
         if not self.powered_on:
             raise RuntimeError("EE core is not powered on")
 
+        pc_before = self.pc
         opcode = memory_map.read8(self.pc, virtual=True)
-        self.pc = (self.pc + 1) & 0xFFFFFFFF
-        cycle_cost = self.cycle_cost(opcode)
+        cycle_cost = 1
+        mnemonic = "NOP"
+        next_pc = (self.pc + 1) & 0xFFFFFFFF
+
+        if opcode == 0x00:
+            mnemonic = "NOP"
+            cycle_cost = 1
+        elif 0x40 <= opcode <= 0x7F:
+            mnemonic = "JUMP"
+            offset = opcode & 0x3F
+            if offset & 0x20:
+                offset -= 0x40
+            next_pc = (self.pc + 1 + offset) & 0xFFFFFFFF
+            cycle_cost = 2
+        elif 0x80 <= opcode <= 0xBF:
+            mnemonic = "LOAD"
+            address = EE_RAM_START + (opcode & 0x3F)
+            self.gpr[1] = memory_map.read8(address, virtual=False)
+            cycle_cost = 3
+        elif 0xC0 <= opcode <= 0xFF:
+            mnemonic = "STORE"
+            address = EE_RAM_START + (opcode & 0x3F)
+            memory_map.write8(address, self.gpr[1], virtual=False)
+            cycle_cost = 3
+        else:
+            mnemonic = "NOP"
+            cycle_cost = 1
+
+        self.pc = next_pc
         self.cycles += cycle_cost
-        return opcode, cycle_cost
+        return InstructionResult(
+            pc_before=pc_before,
+            pc_after=self.pc,
+            opcode=opcode,
+            mnemonic=mnemonic,
+            cycle_cost=cycle_cost,
+        )
 
 
 @dataclass
@@ -180,7 +370,10 @@ class PS2System:
     memory_map: MemoryMap = field(default_factory=MemoryMap)
     ee: EECore = field(default_factory=EECore)
     scheduler: EventScheduler = field(default_factory=EventScheduler)
+    timer0: TimerDevice = field(default_factory=TimerDevice)
+    intc: InterruptController = field(default_factory=InterruptController)
     bios_loaded: bool = False
+    boot_rom: BootROM | None = None
 
     def __post_init__(self) -> None:
         self.memory_map.map_region(MemoryRegion("EE_RAM", EE_RAM_START, EE_RAM_SIZE))
@@ -191,39 +384,78 @@ class PS2System:
         self.memory_map.map_region(
             MemoryRegion("SCRATCHPAD", SCRATCHPAD_START, SCRATCHPAD_SIZE)
         )
+        self.memory_map.map_region(
+            DeviceRegion(
+                "TIMER0",
+                TIMER0_START,
+                TIMER0_SIZE,
+                self.timer0.read8,
+                self.timer0.write8,
+            )
+        )
+        self.memory_map.map_region(
+            DeviceRegion(
+                "INTC",
+                INTC_START,
+                INTC_SIZE,
+                self.intc.read8,
+                self.intc.write8,
+            )
+        )
+        self.scheduler.register_listener(self._on_scheduler_advance)
 
-    def load_bios_bytes(self, bios: bytes) -> None:
-        if not bios:
-            raise ValueError("BIOS file is empty")
+    def _on_scheduler_advance(self, cycles: int, _current_cycle: int) -> None:
+        if self.timer0.tick(cycles):
+            self.intc.request(0)
+
+    def install_boot_rom(self, boot_rom: BootROM) -> None:
         if self.bios_loaded:
             raise RuntimeError("BIOS already loaded; create a new system to reload")
-        if len(bios) > BIOS_SIZE:
-            raise ValueError("BIOS is larger than mapped BIOS region")
-
         bios_region, _ = self.memory_map.resolve(BIOS_START, virtual=False)
-        bios_region._load_bytes(bios, allow_read_only=True)
+        bios_region._load_bytes(boot_rom.image, allow_read_only=True)
+        self.boot_rom = boot_rom
         self.bios_loaded = True
+
+    def load_bios_bytes(self, bios: bytes) -> None:
+        self.install_boot_rom(BootstrapLoader.from_bios_bytes(bios))
 
     def power_on(self) -> None:
         if not self.bios_loaded:
             raise RuntimeError("Load a BIOS before powering on")
         self.ee.reset()
         self.scheduler.current_cycle = 0
+        self.timer0.counter = 0
+        self.timer0.interrupt_latched = False
+        self.intc.pending = 0
 
-    def step(self) -> int:
-        opcode, cycle_cost = self.ee.step(self.memory_map)
-        self.scheduler.advance(cycle_cost)
-        return opcode
+    def step(self) -> InstructionResult:
+        result = self.ee.step(self.memory_map)
+        self.scheduler.advance(result.cycle_cost)
+        return result
 
-    def run_instructions(self, instruction_budget: int) -> int:
+    def run_instructions(
+        self,
+        instruction_budget: int,
+        *,
+        max_cycles: int | None = None,
+        instruction_hook: Callable[[InstructionResult], None] | None = None,
+    ) -> int:
         if instruction_budget <= 0:
             raise ValueError("instruction_budget must be positive")
         if not self.ee.powered_on:
             raise RuntimeError("EE core is not powered on")
+        if max_cycles is not None and max_cycles < 0:
+            raise ValueError("max_cycles must be non-negative")
 
+        executed = 0
         for _ in range(instruction_budget):
-            self.step()
-        return instruction_budget
+            if max_cycles is not None and self.ee.cycles >= max_cycles:
+                break
+            result = self.step()
+            if instruction_hook is not None:
+                instruction_hook(result)
+            executed += 1
+        return executed
 
 
 @dataclass
@@ -232,6 +464,7 @@ class PS2Emulator:
 
     system: PS2System = field(default_factory=PS2System)
     bios: bytes | None = None
+    elf_image: ELFImage | None = None
     frame_count: int = 0
 
     @property
@@ -248,10 +481,14 @@ class PS2Emulator:
 
     def load_bios(self, bios_path: str | Path) -> None:
         """Load BIOS bytes from disk."""
-        path = Path(bios_path)
-        data = path.read_bytes()
-        self.system.load_bios_bytes(data)
-        self.bios = data
+        boot_rom = BootstrapLoader.from_bios_path(bios_path)
+        self.system.install_boot_rom(boot_rom)
+        self.bios = boot_rom.image
+
+    def load_elf(self, elf_path: str | Path) -> ELFImage:
+        """Parse ELF32 metadata as milestone scaffold for future program loading."""
+        self.elf_image = ELFLoader.parse_elf32_path(elf_path)
+        return self.elf_image
 
     def power_on(self) -> None:
         """Reset and power on the emulator."""
@@ -260,12 +497,23 @@ class PS2Emulator:
 
     def step(self) -> int:
         """Execute one pseudo-instruction and return opcode byte."""
-        return self.system.step()
+        return self.system.step().opcode
 
-    def run_frame(self, instruction_budget: int = 1000) -> int:
+    def run_frame(
+        self,
+        instruction_budget: int = 1000,
+        *,
+        max_cycles: int | None = None,
+        instruction_hook: Callable[[InstructionResult], None] | None = None,
+    ) -> int:
         """Execute a frame worth of pseudo-instructions."""
-        executed = self.system.run_instructions(instruction_budget)
-        self.frame_count += 1
+        executed = self.system.run_instructions(
+            instruction_budget,
+            max_cycles=max_cycles,
+            instruction_hook=instruction_hook,
+        )
+        if executed > 0:
+            self.frame_count += 1
         return executed
 
     def status(self) -> dict[str, int | bool]:
@@ -277,6 +525,12 @@ class PS2Emulator:
             "scheduler_cycle": self.system.scheduler.current_cycle,
             "frame_count": self.frame_count,
             "bios_size": len(self.bios) if self.bios is not None else 0,
+            "timer0_counter": self.system.timer0.counter,
+            "timer0_compare": self.system.timer0.compare,
+            "intc_pending": self.system.intc.pending,
+            "intc_mask": self.system.intc.mask,
+            "irq_asserted": self.system.intc.irq_asserted(),
+            "elf_entry_point": self.elf_image.entry_point if self.elf_image else 0,
         }
 
 
@@ -308,13 +562,61 @@ def run_cli(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Print final emulator status as JSON",
     )
+    parser.add_argument(
+        "--max-cycles",
+        type=int,
+        default=None,
+        help="Stop execution once total cycles reach this value",
+    )
+    parser.add_argument(
+        "--trace",
+        action="store_true",
+        help="Print one trace line per executed instruction",
+    )
+    parser.add_argument(
+        "--status-every",
+        type=int,
+        default=0,
+        help="Print JSON status every N executed instructions",
+    )
     parsed = parser.parse_args(args_list)
+    if parsed.instructions <= 0:
+        parser.error("--instructions must be positive")
+    if parsed.frames <= 0:
+        parser.error("--frames must be positive")
+    if parsed.max_cycles is not None and parsed.max_cycles < 0:
+        parser.error("--max-cycles must be non-negative")
+    if parsed.status_every < 0:
+        parser.error("--status-every must be non-negative")
 
     emulator = PS2Emulator()
     emulator.load_bios(parsed.bios)
     emulator.power_on()
+    total_instructions = 0
+
+    def on_instruction(result: InstructionResult) -> None:
+        nonlocal total_instructions
+        total_instructions += 1
+        if parsed.trace:
+            print(
+                f"pc=0x{result.pc_before:08X} opcode=0x{result.opcode:02X} "
+                f"{result.mnemonic} -> pc=0x{result.pc_after:08X} cycles={result.cycle_cost}"
+            )
+        if parsed.status_every and total_instructions % parsed.status_every == 0:
+            print(json.dumps(emulator.status(), sort_keys=True))
+
     for _ in range(parsed.frames):
-        emulator.run_frame(parsed.instructions)
+        executed = emulator.run_frame(
+            parsed.instructions,
+            max_cycles=parsed.max_cycles,
+            instruction_hook=on_instruction,
+        )
+        if (
+            executed == 0
+            and parsed.max_cycles is not None
+            and emulator.cycles >= parsed.max_cycles
+        ):
+            break
 
     status = emulator.status()
     if parsed.status_json:
