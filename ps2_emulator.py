@@ -53,10 +53,20 @@ class BootstrapLoader:
 
 
 @dataclass(frozen=True)
+class ELFSegment:
+    virtual_address: int
+    file_size: int
+    memory_size: int
+    flags: int
+    data: bytes
+
+
+@dataclass(frozen=True)
 class ELFImage:
     entry_point: int
     program_header_offset: int
     program_header_count: int
+    segments: tuple[ELFSegment, ...]
 
 
 class ELFLoader:
@@ -72,11 +82,43 @@ class ELFLoader:
             raise ValueError("Only little-endian ELF is supported in this milestone")
         entry_point = int.from_bytes(raw[24:28], "little")
         phoff = int.from_bytes(raw[28:32], "little")
+        phentsize = int.from_bytes(raw[42:44], "little")
         phnum = int.from_bytes(raw[44:46], "little")
+        if phentsize == 0:
+            raise ValueError("ELF program header entry size must be non-zero")
+        segments: list[ELFSegment] = []
+        for index in range(phnum):
+            header_offset = phoff + index * phentsize
+            header_end = header_offset + phentsize
+            if header_end > len(raw):
+                raise ValueError("ELF program header extends beyond file size")
+            p_type = int.from_bytes(raw[header_offset : header_offset + 4], "little")
+            if p_type != 1:
+                continue
+            p_offset = int.from_bytes(raw[header_offset + 4 : header_offset + 8], "little")
+            p_vaddr = int.from_bytes(raw[header_offset + 8 : header_offset + 12], "little")
+            p_filesz = int.from_bytes(raw[header_offset + 16 : header_offset + 20], "little")
+            p_memsz = int.from_bytes(raw[header_offset + 20 : header_offset + 24], "little")
+            p_flags = int.from_bytes(raw[header_offset + 24 : header_offset + 28], "little")
+            if p_memsz < p_filesz:
+                raise ValueError("ELF PT_LOAD segment has mem size smaller than file size")
+            data_end = p_offset + p_filesz
+            if data_end > len(raw):
+                raise ValueError("ELF PT_LOAD segment data extends beyond file size")
+            segments.append(
+                ELFSegment(
+                    virtual_address=p_vaddr,
+                    file_size=p_filesz,
+                    memory_size=p_memsz,
+                    flags=p_flags,
+                    data=raw[p_offset:data_end],
+                )
+            )
         return ELFImage(
             entry_point=entry_point,
             program_header_offset=phoff,
             program_header_count=phnum,
+            segments=tuple(segments),
         )
 
     @staticmethod
@@ -273,7 +315,7 @@ class MemoryMap:
                 )
         self.regions.append(region)
 
-    def resolve(self, address: int, virtual: bool = True) -> tuple[MemoryRegion, int]:
+    def resolve(self, address: int, virtual: bool = True) -> tuple[AddressableRegion, int]:
         physical = self.mmu.translate_ee_virtual(address) if virtual else address
         for region in self.regions:
             if region.contains(physical):
@@ -416,6 +458,16 @@ class PS2System:
         self.boot_rom = boot_rom
         self.bios_loaded = True
 
+    def load_elf_image(self, elf_image: ELFImage) -> None:
+        for segment in elf_image.segments:
+            for index, byte in enumerate(segment.data):
+                self.memory_map.write8(segment.virtual_address + index, byte, virtual=True)
+            zero_fill = segment.memory_size - segment.file_size
+            for index in range(zero_fill):
+                self.memory_map.write8(
+                    segment.virtual_address + segment.file_size + index, 0, virtual=True
+                )
+
     def load_bios_bytes(self, bios: bytes) -> None:
         self.install_boot_rom(BootstrapLoader.from_bios_bytes(bios))
 
@@ -465,6 +517,7 @@ class PS2Emulator:
     system: PS2System = field(default_factory=PS2System)
     bios: bytes | None = None
     elf_image: ELFImage | None = None
+    boot_from_elf: bool = False
     frame_count: int = 0
 
     @property
@@ -486,13 +539,16 @@ class PS2Emulator:
         self.bios = boot_rom.image
 
     def load_elf(self, elf_path: str | Path) -> ELFImage:
-        """Parse ELF32 metadata as milestone scaffold for future program loading."""
+        """Parse ELF32 metadata and load PT_LOAD segments into mapped memory."""
         self.elf_image = ELFLoader.parse_elf32_path(elf_path)
+        self.system.load_elf_image(self.elf_image)
         return self.elf_image
 
     def power_on(self) -> None:
         """Reset and power on the emulator."""
         self.system.power_on()
+        if self.boot_from_elf and self.elf_image is not None:
+            self.system.ee.pc = self.elf_image.entry_point & 0xFFFFFFFF
         self.frame_count = 0
 
     def step(self) -> int:
@@ -531,6 +587,7 @@ class PS2Emulator:
             "intc_mask": self.system.intc.mask,
             "irq_asserted": self.system.intc.irq_asserted(),
             "elf_entry_point": self.elf_image.entry_point if self.elf_image else 0,
+            "elf_segments": len(self.elf_image.segments) if self.elf_image else 0,
         }
 
 
@@ -579,6 +636,16 @@ def run_cli(argv: list[str] | None = None) -> int:
         default=0,
         help="Print JSON status every N executed instructions",
     )
+    parser.add_argument(
+        "--elf",
+        default=None,
+        help="Optional ELF32 path to load PT_LOAD segments before execution",
+    )
+    parser.add_argument(
+        "--boot-elf",
+        action="store_true",
+        help="Set PC to ELF entry point on power-on (requires --elf)",
+    )
     parsed = parser.parse_args(args_list)
     if parsed.instructions <= 0:
         parser.error("--instructions must be positive")
@@ -588,9 +655,14 @@ def run_cli(argv: list[str] | None = None) -> int:
         parser.error("--max-cycles must be non-negative")
     if parsed.status_every < 0:
         parser.error("--status-every must be non-negative")
+    if parsed.boot_elf and not parsed.elf:
+        parser.error("--boot-elf requires --elf")
 
     emulator = PS2Emulator()
     emulator.load_bios(parsed.bios)
+    if parsed.elf:
+        emulator.load_elf(parsed.elf)
+        emulator.boot_from_elf = parsed.boot_elf
     emulator.power_on()
     total_instructions = 0
 

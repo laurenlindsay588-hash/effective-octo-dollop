@@ -222,25 +222,47 @@ class PS2EmulatorTests(unittest.TestCase):
         self.assertEqual(final_status["pc"], (EE_RESET_VECTOR + 4) & 0xFFFFFFFF)
 
     def test_elf_loader_parses_elf32_header(self):
-        raw = bytearray(52)
+        raw = bytearray(84)
         raw[0:4] = b"\x7fELF"
         raw[4] = 1
         raw[5] = 1
         raw[24:28] = (0x00100000).to_bytes(4, "little")
         raw[28:32] = (0x34).to_bytes(4, "little")
-        raw[44:46] = (2).to_bytes(2, "little")
+        raw[42:44] = (32).to_bytes(2, "little")
+        raw[44:46] = (1).to_bytes(2, "little")
+        # Program header 0: PT_LOAD segment
+        raw[52:56] = (1).to_bytes(4, "little")
+        raw[56:60] = (80).to_bytes(4, "little")
+        raw[60:64] = (0x00000010).to_bytes(4, "little")
+        raw[68:72] = (4).to_bytes(4, "little")
+        raw[72:76] = (8).to_bytes(4, "little")
+        raw[76:80] = (5).to_bytes(4, "little")
+        raw[80:84] = b"\xAA\xBB\xCC\xDD"
 
         image = ELFLoader.parse_elf32(bytes(raw))
         self.assertEqual(image.entry_point, 0x00100000)
         self.assertEqual(image.program_header_offset, 0x34)
-        self.assertEqual(image.program_header_count, 2)
+        self.assertEqual(image.program_header_count, 1)
+        self.assertEqual(len(image.segments), 1)
+        self.assertEqual(image.segments[0].virtual_address, 0x10)
+        self.assertEqual(image.segments[0].memory_size, 8)
+        self.assertEqual(image.segments[0].data, b"\xAA\xBB\xCC\xDD")
 
     def test_emulator_load_elf_scaffold(self):
-        raw = bytearray(52)
+        raw = bytearray(88)
         raw[0:4] = b"\x7fELF"
         raw[4] = 1
         raw[5] = 1
         raw[24:28] = (0x00020000).to_bytes(4, "little")
+        raw[28:32] = (0x34).to_bytes(4, "little")
+        raw[42:44] = (32).to_bytes(2, "little")
+        raw[44:46] = (1).to_bytes(2, "little")
+        raw[52:56] = (1).to_bytes(4, "little")
+        raw[56:60] = (84).to_bytes(4, "little")
+        raw[60:64] = (0x00000020).to_bytes(4, "little")
+        raw[68:72] = (4).to_bytes(4, "little")
+        raw[72:76] = (8).to_bytes(4, "little")
+        raw[84:88] = b"\x10\x11\x12\x13"
         with tempfile.TemporaryDirectory() as tmp:
             elf_path = Path(tmp) / "homebrew.elf"
             elf_path.write_bytes(bytes(raw))
@@ -248,10 +270,36 @@ class PS2EmulatorTests(unittest.TestCase):
             image = emulator.load_elf(elf_path)
         self.assertEqual(image.entry_point, 0x00020000)
         self.assertEqual(emulator.status()["elf_entry_point"], 0x00020000)
+        self.assertEqual(emulator.status()["elf_segments"], 1)
+        self.assertEqual(emulator.system.memory_map.read8(0x20, virtual=False), 0x10)
+        self.assertEqual(emulator.system.memory_map.read8(0x23, virtual=False), 0x13)
+        self.assertEqual(emulator.system.memory_map.read8(0x24, virtual=False), 0x00)
+
+    def test_power_on_can_boot_from_elf_entry(self):
+        emulator = PS2Emulator()
+        bios = bytes([0x00] * 32)
+        raw = bytearray(52)
+        raw[0:4] = b"\x7fELF"
+        raw[4] = 1
+        raw[5] = 1
+        raw[24:28] = (0x00030040).to_bytes(4, "little")
+        raw[42:44] = (32).to_bytes(2, "little")
+        with tempfile.TemporaryDirectory() as tmp:
+            emulator.load_bios(self._write_bios(tmp, bios))
+            elf_path = Path(tmp) / "boot.elf"
+            elf_path.write_bytes(bytes(raw))
+            emulator.load_elf(elf_path)
+        emulator.boot_from_elf = True
+        emulator.power_on()
+        self.assertEqual(emulator.pc, 0x00030040)
 
     def test_elf_loader_rejects_non_elf(self):
         with self.assertRaises(ValueError):
             ELFLoader.parse_elf32(b"not-an-elf")
+
+    def test_cli_boot_elf_requires_elf_arg(self):
+        with self.assertRaises(SystemExit):
+            run_cli(["--bios", "/tmp/fake.bin", "--boot-elf"])
 
 
 if __name__ == "__main__":
