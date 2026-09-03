@@ -31,9 +31,14 @@ class MemoryRegion:
     start: int
     size: int
     read_only: bool = False
-    data: bytearray = field(default_factory=bytearray)
+    data: bytearray | None = None
+    _sparse_data: dict[int, int] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        if self.data is None:
+            if self.read_only:
+                self.data = bytearray(self.size)
+            return
         if len(self.data) == 0:
             self.data = bytearray(self.size)
         if len(self.data) != self.size:
@@ -43,20 +48,37 @@ class MemoryRegion:
         return self.start <= address < (self.start + self.size)
 
     def read8(self, address: int) -> int:
-        return self.data[address - self.start]
+        offset = address - self.start
+        if self.data is not None:
+            return self.data[offset]
+        return self._sparse_data.get(offset, 0)
 
     def write8(self, address: int, value: int) -> None:
         if self.read_only:
             raise PermissionError(f"{self.name} is read-only")
-        self.data[address - self.start] = value & 0xFF
+        value8 = value & 0xFF
+        offset = address - self.start
+        if self.data is not None:
+            self.data[offset] = value8
+            return
+        if value8 == 0:
+            self._sparse_data.pop(offset, None)
+            return
+        self._sparse_data[offset] = value8
 
-    def load_bytes(self, payload: bytes, offset: int = 0) -> None:
-        # Intentional raw loader for initialization paths (e.g., BIOS image load).
-        # Runtime writes must still go through write8(), which enforces read_only.
+    def _load_bytes(
+        self, payload: bytes, offset: int = 0, *, allow_read_only: bool = False
+    ) -> None:
+        if self.read_only and not allow_read_only:
+            raise PermissionError(f"{self.name} is read-only")
         end = offset + len(payload)
         if offset < 0 or end > self.size:
             raise ValueError(f"{self.name} load out of bounds")
-        self.data[offset:end] = payload
+        if self.data is not None:
+            self.data[offset:end] = payload
+            return
+        for index, byte in enumerate(payload):
+            self.write8(self.start + offset + index, byte)
 
 
 @dataclass
@@ -82,6 +104,13 @@ class MemoryMap:
     regions: list[MemoryRegion] = field(default_factory=list)
 
     def map_region(self, region: MemoryRegion) -> None:
+        region_end = region.start + region.size
+        for existing in self.regions:
+            existing_end = existing.start + existing.size
+            if region.start < existing_end and existing.start < region_end:
+                raise ValueError(
+                    f"Region {region.name} overlaps existing region {existing.name}"
+                )
         self.regions.append(region)
 
     def resolve(self, address: int, virtual: bool = True) -> tuple[MemoryRegion, int]:
@@ -169,7 +198,7 @@ class PS2System:
             raise ValueError("BIOS is larger than mapped BIOS region")
 
         bios_region, _ = self.memory_map.resolve(BIOS_START, virtual=False)
-        bios_region.load_bytes(bios)
+        bios_region._load_bytes(bios, allow_read_only=True)
         self.bios_loaded = True
 
     def power_on(self) -> None:

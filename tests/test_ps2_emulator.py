@@ -2,7 +2,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ps2_emulator import BIOS_START, EE_RESET_VECTOR, PS2Emulator
+from ps2_emulator import (
+    BIOS_START,
+    EE_RAM_START,
+    EE_RESET_VECTOR,
+    MemoryMap,
+    MemoryRegion,
+    PS2Emulator,
+    PS2System,
+)
 
 
 class PS2EmulatorTests(unittest.TestCase):
@@ -64,6 +72,27 @@ class PS2EmulatorTests(unittest.TestCase):
             emulator.load_bios(bios_a)
             with self.assertRaises(RuntimeError):
                 emulator.load_bios(bios_b)
+
+    def test_memory_map_rejects_overlapping_regions(self):
+        memory_map = MemoryMap()
+        memory_map.map_region(MemoryRegion("A", 0x1000, 0x100))
+        with self.assertRaises(ValueError):
+            memory_map.map_region(MemoryRegion("B", 0x1080, 0x100))
+
+    def test_read_only_region_raw_load_is_internal_only(self):
+        bios_region = MemoryRegion("BIOS", BIOS_START, 0x100, read_only=True)
+        with self.assertRaises(PermissionError):
+            bios_region._load_bytes(b"\x01")
+        bios_region._load_bytes(b"\x01", allow_read_only=True)
+        self.assertEqual(bios_region.read8(BIOS_START), 0x01)
+
+    def test_ram_regions_use_sparse_backing(self):
+        system = PS2System()
+        ee_ram, _ = system.memory_map.resolve(EE_RAM_START, virtual=False)
+        self.assertIsNone(ee_ram.data)
+        self.assertEqual(system.memory_map.read8(EE_RAM_START, virtual=False), 0)
+        system.memory_map.write8(EE_RAM_START, 0xAB, virtual=False)
+        self.assertEqual(system.memory_map.read8(EE_RAM_START, virtual=False), 0xAB)
 
 
 if __name__ == "__main__":
