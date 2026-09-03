@@ -9,6 +9,9 @@ This module introduces subsystem boundaries and an EE+memory-map harness:
 
 from __future__ import annotations
 
+import argparse
+import json
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
@@ -277,9 +280,49 @@ class PS2Emulator:
         }
 
 
-if __name__ == "__main__":
-    emulator = PS2Emulator()
-    print(
-        "PS2 milestone architecture ready. "
-        "Load a BIOS with PS2Emulator.load_bios(...) and call power_on()."
+def run_cli(argv: list[str] | None = None) -> int:
+    args_list = sys.argv[1:] if argv is None else argv
+    if not args_list:
+        print(
+            "PS2 milestone architecture ready. "
+            "Run with --bios /absolute/path/to/bios.bin to execute frames."
+        )
+        return 0
+
+    parser = argparse.ArgumentParser(description="Run PS2 emulator scaffold")
+    parser.add_argument("--bios", required=True, help="Absolute path to BIOS image")
+    parser.add_argument(
+        "--instructions",
+        type=int,
+        default=1000,
+        help="Instructions to run per frame (default: 1000)",
     )
+    parser.add_argument(
+        "--frames",
+        type=int,
+        default=1,
+        help="Number of frames to execute (default: 1)",
+    )
+    parser.add_argument(
+        "--status-json",
+        action="store_true",
+        help="Print final emulator status as JSON",
+    )
+    parsed = parser.parse_args(args_list)
+
+    emulator = PS2Emulator()
+    emulator.load_bios(parsed.bios)
+    emulator.power_on()
+    for _ in range(parsed.frames):
+        emulator.run_frame(parsed.instructions)
+
+    status = emulator.status()
+    if parsed.status_json:
+        print(json.dumps(status, sort_keys=True))
+    else:
+        print(status)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(run_cli())

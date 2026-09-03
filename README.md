@@ -13,6 +13,12 @@ Current capabilities:
 - Event scheduler cycle tracking
 - Facade API (`PS2Emulator`) for loading BIOS and running instruction frames
 
+Run emulator scaffold:
+
+```bash
+python ps2_emulator.py --bios /absolute/path/to/bios.bin --instructions 3 --frames 1 --status-json
+```
+
 Run tests:
 
 ```bash

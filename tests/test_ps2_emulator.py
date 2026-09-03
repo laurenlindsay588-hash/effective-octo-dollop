@@ -1,3 +1,6 @@
+import contextlib
+import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +13,7 @@ from ps2_emulator import (
     MemoryRegion,
     PS2Emulator,
     PS2System,
+    run_cli,
 )
 
 
@@ -93,6 +97,38 @@ class PS2EmulatorTests(unittest.TestCase):
         self.assertEqual(system.memory_map.read8(EE_RAM_START, virtual=False), 0)
         system.memory_map.write8(EE_RAM_START, 0xAB, virtual=False)
         self.assertEqual(system.memory_map.read8(EE_RAM_START, virtual=False), 0xAB)
+
+    def test_cli_without_args_prints_guidance(self):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            code = run_cli([])
+        self.assertEqual(code, 0)
+        self.assertIn("Run with --bios", stdout.getvalue())
+
+    def test_cli_with_bios_runs_and_prints_json_status(self):
+        bios = bytes([0x01, 0x02, 0x03, 0x00]) + bytes(64)
+        with tempfile.TemporaryDirectory() as tmp:
+            bios_path = Path(tmp) / "bios.bin"
+            bios_path.write_bytes(bios)
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                code = run_cli(
+                    [
+                        "--bios",
+                        str(bios_path),
+                        "--instructions",
+                        "3",
+                        "--frames",
+                        "2",
+                        "--status-json",
+                    ]
+                )
+        self.assertEqual(code, 0)
+        status = json.loads(stdout.getvalue())
+        self.assertTrue(status["powered_on"])
+        self.assertEqual(status["frame_count"], 2)
+        self.assertEqual(status["pc"], (EE_RESET_VECTOR + 6) & 0xFFFFFFFF)
+        self.assertEqual(status["bios_size"], len(bios))
 
 
 if __name__ == "__main__":
